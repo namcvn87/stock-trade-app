@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+pandas
+vnstock
+psycopg2-binary   # nếu dùng PostgreSQL
+pymysql           # nếu dùng MySQL
+python-dotenv     # nếu cần load .env
+apscheduler
