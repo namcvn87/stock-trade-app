@@ -1,5 +1,5 @@
 import time, random
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from sqlalchemy.orm import Session
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from vnstock import Vnstock, Listing
@@ -8,6 +8,10 @@ from sqlalchemy import func
 from .. import models, database
 
 router = APIRouter(prefix="/stocks", tags=["Stocks"])
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, or_
+from datetime import date, timedelta, datetime
 
 
 # Dependency để lấy session DB
@@ -193,6 +197,7 @@ def delta_load():
         "prices": total_prices,
         "errors": errors
     }
+
 # ===================== API TODAY LOAD =====================
 @router.post("/today_load")
 def today_load():
@@ -239,6 +244,7 @@ def today_load():
         "prices": total_prices,
         "errors": errors
     }
+
 
 
 # ===================== GET API: COMPANIES =====================
