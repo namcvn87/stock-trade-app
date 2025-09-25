@@ -48,7 +48,7 @@ def fetch_and_save_symbol(symbol: str, row: dict, start_date: str):
             print(f"❌ Lỗi lưu company {symbol}: {e}")
 
         # Delay ngẫu nhiên tránh rate-limit
-        time.sleep(random.uniform(0.5, 2.0))
+        time.sleep(random.uniform(1.0, 3.0))
 
         stock = Vnstock().stock(symbol=symbol, source="VCI")
 
@@ -197,6 +197,55 @@ def delta_load():
         "prices": total_prices,
         "errors": errors
     }
+
+# ===================== API TODAY LOAD =====================
+@router.post("/today_load")
+def today_load():
+    listing = Listing()
+    try:
+        df_symbols = listing.all_symbols(to_df=True)
+    except Exception as e:
+        return {"error": f"Không fetch được danh sách symbols: {e}"}
+
+    # Detect tên cột mã cổ phiếu
+    if "ticker" in df_symbols.columns:
+        code_col = "ticker"
+    elif "symbol" in df_symbols.columns:
+        code_col = "symbol"
+    elif "stockCode" in df_symbols.columns:
+        code_col = "stockCode"
+    else:
+        return {"error": f"Không tìm thấy cột mã cổ phiếu trong {df_symbols.columns.tolist()}"}
+
+    today = date.today().strftime("%Y-%m-%d")
+    total_companies, total_prices = 0, 0
+    errors = []
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {}
+        for _, row in df_symbols.iterrows():
+            symbol = row[code_col]
+            # chỉ lấy dữ liệu ngày hôm nay
+            futures[executor.submit(fetch_and_save_symbol, symbol, row, today)] = symbol
+
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                c, p = future.result()
+                total_companies += c
+                total_prices += p
+            except Exception as e:
+                print(f"❌ Không fetch được {symbol}: {e}")
+                errors.append(symbol)
+
+    return {
+        "date": today,
+        "companies": total_companies,
+        "prices": total_prices,
+        "errors": errors
+    }
+
+
 
 # ===================== GET API: COMPANIES =====================
 @router.get("/companies")
