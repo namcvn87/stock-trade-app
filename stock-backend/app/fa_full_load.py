@@ -1,277 +1,254 @@
-import datetime, time, random
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
-from vnstock import Vnstock, Listing
-
-from .database import SessionLocal
-from . import models
+# loader.py
+import logging, time, re 
 import pandas as pd
+from vnstock import Listing, Finance
+from app.database import SessionLocal, engine
+from app.models import Base, FinancialReport
+import json, os
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-# ===================== Helpers =====================
-def normalize_report_date(value, period_type="year"):
+# # Tạo bảng nếu chưa có
+# Base.metadata.create_all(bind=engine)
+
+CHECKPOINT_FILE = "fa_checkpoint.json"
+
+def load_checkpoint():
+    """Đọc checkpoint từ file JSON"""
+    if not os.path.exists(CHECKPOINT_FILE):
+        return None
     try:
-        year = int(value)
-        if period_type == "year":
-            return datetime.date(year, 12, 31)
-        return datetime.date(year, 12, 31)  # fallback
+        with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f).get("last_ticker")
     except Exception:
         return None
 
+def save_checkpoint(ticker):
+    """Ghi checkpoint (last_ticker) ra file JSON"""
+    with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"last_ticker": ticker}, f)
 
-# ===== Mapping cho IncomeStatement =====
-def map_income_row(row):
-    return {
-        "doanh_thu": row.get("Doanh thu (đồng)"),
-        "tang_truong_doanh_thu": row.get("Tăng trưởng doanh thu (%)"),
-        "loi_nhuan_sau_thue_cty_me": row.get("Lợi nhuận sau thuế của Cổ đông công ty mẹ (đồng)"),
-        "tang_truong_loi_nhuan": row.get("Tăng trưởng lợi nhuận (%)"),
-        "thu_nhap_lai_va_tuong_tu": row.get("Thu nhập lãi và các khoản tương tự"),
-        "chi_phi_lai_va_tuong_tu": row.get("Chi phí lãi và các khoản tương tự"),
-        "thu_nhap_lai_thuan": row.get("Thu nhập lãi thuần"),
-        "thu_nhap_dich_vu": row.get("Thu nhập từ hoạt động dịch vụ"),
-        "chi_phi_dich_vu": row.get("Chi phí hoạt động dịch vụ"),
-        "lai_thuan_dich_vu": row.get("Lãi thuần từ hoạt động dịch vụ"),
-        "kinh_doanh_ngoai_hoi_vang": row.get("Kinh doanh ngoại hối và vàng"),
-        "chung_khoan_kinh_doanh": row.get("Chứng khoán kinh doanh"),
-        "chung_khoan_dau_tu": row.get("Chứng khoán đầu tư"),
-        "hoat_dong_khac": row.get("Hoạt động khác"),
-        "chi_phi_hoat_dong_khac": row.get("Chi phí hoạt động khác"),
-        "lai_lo_thuan_hd_khac": row.get("Lãi/lỗ thuần từ hoạt động khác"),
-        "co_tuc_da_nhan": row.get("Cố tức đã nhận"),
-        "tong_thu_nhap_hd": row.get("Tổng thu nhập hoạt động"),
-        "chi_phi_quan_ly_dn": row.get("Chi phí quản lý DN"),
-        "ln_truoc_du_phong": row.get("LN từ HĐKD trước CF dự phòng"),
-        "chi_phi_du_phong_rui_ro": row.get("Chi phí dự phòng rủi ro tín dụng"),
-        "ln_truoc_thue": row.get("LN trước thuế"),
-        "thue_tndn": row.get("Thuế TNDN"),
-        "thue_tndn_hien_hanh": row.get("Chi phí thuế TNDN hiện hành"),
-        "thue_tndn_hoan_lai": row.get("Chi phí thuế TNDN hoãn lại"),
-        "co_dong_thieu_so": row.get("Cổ đông thiểu số"),
-        "loi_nhuan_thuan": row.get("Lợi nhuận thuần"),
-        "loi_nhuan_cty_me": row.get("Cổ đông của Công ty mẹ"),
-        "eps": row.get("Lãi cơ bản trên cổ phiếu"),
-    }
-
-
-# ===== Mapping cho BalanceSheet =====
-def map_balance_row(row):
-    return {
-        "tong_tai_san": row.get("TỔNG CỘNG TÀI SẢN (đồng)"),
-        "tien_va_tuong_duong": row.get("Tiền và tương đương tiền (đồng)"),
-        "tien_gui_nhnn": row.get("Tiền gửi tại ngân hàng nhà nước Việt Nam"),
-        "tien_gui_tctd": row.get("Tiền gửi tại các TCTD khác và cho vay các TCTD khác"),
-        "ck_kinh_doanh": row.get("Chứng khoán kinh doanh"),
-        "ck_kinh_doanh_khac": row.get("_Chứng khoán kinh doanh"),
-        "du_phong_ck_kinh_doanh": row.get("Dự phòng giảm giá chứng khoán kinh doanh"),
-        "cong_cu_phai_sinh": row.get("Các công cụ tài chính phái sinh và khoản nợ tài chính khác"),
-        "cho_vay_khach_hang": row.get("Cho vay khách hàng"),
-        "cho_vay_khach_hang_khac": row.get("_Cho vay khách hàng"),
-        "du_phong_cho_vay": row.get("Dự phòng rủi ro cho vay khách hàng"),
-        "ck_dau_tu": row.get("Chứng khoán đầu tư"),
-        "ck_san_sang_ban": row.get("Chứng khoán đầu tư sẵn sàng để bán"),
-        "ck_giu_den_dao_han": row.get("Chứng khoán đầu tư giữ đến ngày đáo hạn"),
-        "du_phong_ck_dau_tu": row.get("Dự phòng giảm giá chứng khoán đầu tư"),
-        "dau_tu_dai_han": row.get("Đầu tư dài hạn (đồng)"),
-        "dau_tu_lien_doanh": row.get("Đầu tư vào công ty liên doanh"),
-        "tai_san_dai_han_khac": row.get("Tài sản dài hạn khác (đồng)"),
-        "du_phong_dau_tu_dai_han": row.get("Dự phòng giảm giá đầu tư dài hạn"),
-        "tai_san_co_dinh": row.get("Tài sản cố định (đồng)"),
-        "tscd_huu_hinh": row.get("Tài sản cố định hữu hình"),
-        "tscd_vo_hinh": row.get("Tài sản cố định vô hình"),
-        "tai_san_co_khac": row.get("Tài sản Có khác"),
-        "tong_nguon_von": row.get("TỔNG CỘNG NGUỒN VỐN (đồng)"),
-        "no_phai_tra": row.get("NỢ PHẢI TRẢ (đồng)"),
-        "no_cp_va_nhnn": row.get("Các khoản nợ chính phủ và NHNN Việt Nam"),
-        "no_tctd": row.get("Tiền gửi và vay các Tổ chức tín dụng khác"),
-        "tien_gui_khach_hang": row.get("Tiền gửi của khách hàng"),
-        "cong_cu_phai_sinh_no": row.get("_Các công cụ tài chính phái sinh và khoản nợ tài chính khác"),
-        "von_tai_tro_uy_thac": row.get("Vốn tài trợ, uỷ thác đầu tư của CP và các tổ chức TD khác"),
-        "phat_hanh_giay_to": row.get("Phát hành giấy tờ có giá"),
-        "no_khac": row.get("Các khoản nợ khác"),
-        "von_chu_so_huu": row.get("VỐN CHỦ SỞ HỮU (đồng)"),
-        "von_to_chuc_td": row.get("Vốn của tổ chức tín dụng"),
-        "quy_to_chuc_td": row.get("Quỹ của tổ chức tín dụng"),
-        "chenh_lech_ty_gia": row.get("Chênh lệch tỷ giá hối đoái"),
-        "chenh_lech_danh_gia": row.get("Chênh lệch đánh giá lại tài sản"),
-        "loi_nhuan_chua_pp": row.get("Lãi chưa phân phối (đồng)"),
-        "von_gop_chu_so_huu": row.get("Vốn góp của chủ sở hữu (đồng)"),
-        "cac_quy_khac": row.get("Các quỹ khác"),
-        "loi_ich_cd_thieu_so": row.get("LỢI ÍCH CỦA CỔ ĐÔNG THIỂU SỐ"),
-    }
-
-
-# ===== Mapping cho CashFlow =====
-def map_cashflow_row(row):
-    return {
-        "lai_lo_hd_khac": row.get("(Lãi)/lỗ các hoạt động khác"),
-        "lc_tu_hd_kd_truoc_vld": row.get("Lưu chuyển tiền thuần từ HĐKD trước thay đổi VLĐ"),
-        "lc_tu_hd_kd_truoc_thue": row.get("Lưu chuyển tiền thuần từ HĐKD trước thuế"),
-        "chi_tu_cac_quy_tctd": row.get("Chi từ các quỹ của TCTD"),
-        "mua_sam_tscd": row.get("Mua sắm TSCĐ"),
-        "tien_thu_co_tuc": row.get("Tiền thu cổ tức và lợi nhuận được chia"),
-        "lc_tu_hd_dau_tu": row.get("Lưu chuyển từ hoạt động đầu tư"),
-        "tang_von_co_phan": row.get("Tăng vốn cổ phần từ góp vốn và/hoặc phát hành cổ phiếu"),
-        "lc_tu_hd_tc": row.get("Lưu chuyển tiền từ hoạt động tài chính"),
-        "lc_thuan_trong_ky": row.get("Lưu chuyển tiền thuần trong kỳ"),
-        "tien_va_tuong_duong": row.get("Tiền và tương đương tiền"),
-        "tien_va_tuong_duong_ck": row.get("Tiền và tương đương tiền cuối kỳ"),
-        "lc_rong_hd_sxkd": row.get("Lưu chuyển tiền tệ ròng từ các hoạt động SXKD"),
-        "tien_thu_thanh_ly_tscd": row.get("Tiền thu được từ thanh lý tài sản cố định"),
-        "dau_tu_dn_khac": row.get("Đầu tư vào các doanh nghiệp khác"),
-        "tien_thu_ban_dau_tu": row.get("Tiền thu từ việc bán các khoản đầu tư vào doanh nghiệp khác"),
-        "co_tuc_da_tra": row.get("Cổ tức đã trả"),
-    }
-
-
-# ===================== Fetch + Save =====================
-def save_finance(symbol: str, df_income=None, df_balance=None, df_cashflow=None, period="year", lang="vi"):
-    db = SessionLocal()
-    rows = {"income": 0, "balance": 0, "cashflow": 0}
-
-
+def get_all_tickers():
+    """Thử nhiều cách lấy list tickers, trả về list string."""
+    # Cách 1: Listing.all_symbols (class method)
     try:
-        # Income
-        if df_income is not None and not df_income.empty:
-            for _, row in df_income.iterrows():
-                insert_stmt = insert(models.IncomeStatement).values(
-                    symbol=symbol,
-                    report_date=normalize_report_date(row["Năm"], period),
-                    period_type=period,
-                    lang=lang,
-                    source="VCI",
-                    **map_income_row(row)
-                )
-                stmt = insert_stmt.on_conflict_do_update(
-                    constraint="uq_income_unique", set_=map_income_row(row)
-                )
-                db.execute(stmt)
-                rows["income"] += 1
+        df = Listing.all_symbols()
+        if isinstance(df, pd.DataFrame) and "symbol" in df.columns:
+            return df['symbol'].dropna().unique().tolist()
+    except Exception:
+        pass
 
-        # Balance
-        if df_balance is not None and not df_balance.empty:
-            for _, row in df_balance.iterrows():
-                insert_stmt = insert(models.BalanceSheet).values(
-                    symbol=symbol,
-                    report_date=normalize_report_date(row["Năm"], period),
-                    period_type=period,
-                    lang=lang,
-                    source="VCI",
-                    **map_balance_row(row)
-                )
-                stmt = insert_stmt.on_conflict_do_update(
-                    constraint="uq_balance_unique", set_=map_balance_row(row)
-                )
-                db.execute(stmt)
-                rows["balance"] += 1
-
-        # CashFlow
-        if df_cashflow is not None and not df_cashflow.empty:
-            for _, row in df_cashflow.iterrows():
-                insert_stmt = insert(models.CashFlow).values(
-                    symbol=symbol,
-                    report_date=normalize_report_date(row["Năm"], period),
-                    period_type=period,
-                    lang=lang,
-                    source="VCI",
-                    **map_cashflow_row(row)
-                )
-                stmt = insert_stmt.on_conflict_do_update(
-                    constraint="uq_cashflow_unique", set_=map_cashflow_row(row)
-                )
-                db.execute(stmt)
-                rows["cashflow"] += 1
-
-        db.commit()
-
-    except Exception as e:
-        db.rollback()
-        print(f"❌ {symbol} Error saving: {e}")
-    finally:
-        db.close()
-
-    return rows
-
-def fetch_and_save_finance(symbol: str, period="year", lang="vi"):
-    
-    # Delay ngẫu nhiên tránh rate-limit
-    time.sleep(random.uniform(0.5, 2.0))
-    stock = Vnstock().stock(symbol=symbol, source="VCI")
-    df_income = stock.finance.income_statement(period=period, lang=lang)
-    df_balance = stock.finance.balance_sheet(period=period, lang=lang)
-    df_cf = stock.finance.cash_flow(period=period, lang=lang)
-    return save_finance(symbol, df_income, df_balance, df_cf, period, lang)
-
-# ===================== FULL LOAD =====================
-def full_load():
-    listing = Listing()
+    # Cách 2: Listing() instance .all_symbols()
     try:
-        df_symbols = listing.all_symbols(to_df=True)
-    except Exception as e:
-        print(f"❌ Không fetch được danh sách symbols: {e}")
+        listing = Listing()
+        df = listing.all_symbols()
+        if isinstance(df, pd.DataFrame) and "symbol" in df.columns:
+            return df['symbol'].dropna().unique().tolist()
+    except Exception:
+        pass
+
+    # Thất bại -> trả về danh sách rỗng (caller phải xử lý)
+    logger.error("Không thể lấy danh sách tickers từ vnstock.")
+    return []
+
+# def compute_record_key(ticker, report_type, period_type, report_year, report_quarter, item_name, idx):
+#     item_part = (str(item_name).strip() if item_name else f"row_{idx}")
+#     return f"{ticker}|{report_type}|{period_type}|{report_year}|{report_quarter}|{item_part}"
+
+def save_to_db(df: pd.DataFrame):
+    """
+    Lưu từng row (row -> JSON) vào bảng 'financial_reports'.
+    Trước khi insert, kiểm tra nếu đã có record (bằng record_key) thì update.
+    """
+    if df is None or df.empty:
+        logger.info("Empty df -> skip save_to_db")
         return
 
-    code_col = "ticker" if "ticker" in df_symbols.columns else "symbol"
+    session = SessionLocal()
+    skipped = 0
+    try:
+        for idx, row in df.reset_index(drop=True).iterrows():
+            rowdict = row.to_dict()
+            ticker = rowdict.get("ticker")
+            report_type = rowdict.get("report_type")
+            period_type = rowdict.get("period_type")
+            report_year = rowdict.get("report_year")
+            report_quarter = rowdict.get("report_quarter")
+            lang = rowdict.get("lang")
+            # tìm tên chỉ tiêu (nhiều version có cột 'Chỉ tiêu'/'item'/'label'...)
+            # item_name = rowdict.get("Chỉ tiêu") or rowdict.get("item") or rowdict.get("label") or None
+            # record_key = compute_record_key(ticker, report_type, period_type, report_year, report_quarter, lang, item_name, idx)
 
-    total = {"income": 0, "balance": 0, "cashflow": 0}
+            # Dò xem đã có bản ghi này chưa: ta dùng điều kiện tương đương record_key bằng chuỗi
+            existing = session.query(FinancialReport).filter(
+                FinancialReport.ticker == ticker,
+                FinancialReport.report_type == report_type,
+                FinancialReport.period_type == period_type,
+                FinancialReport.report_year == report_year,
+                FinancialReport.report_quarter == report_quarter
+            ).first()
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {}
-        for _, row in df_symbols.iterrows():
-            symbol = row[code_col]
-            futures[executor.submit(fetch_and_save_finance, symbol)] = symbol
+            if existing:
+                skipped += 1
+                continue
 
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                result = future.result()
-                total["income"] += result["income"]
-                total["balance"] += result["balance"]
-                total["cashflow"] += result["cashflow"]
-                print(f"✅ {symbol}: Income={result['income']}, Balance={result['balance']}, CF={result['cashflow']}")
-            except Exception as e:
-                print(f"❌ {symbol} Error: {e}")
+            # Nếu muốn chính xác theo item / record_key thì thay bằng filter tương ứng;
+            # để đơn giản ở đây: nếu đã có một bản ghi cho ticker+type+period+year thì append (không trùng)
+            # => ta chèn mới mỗi dòng (nhưng có thể nâng cấp thành kiểm tra record_key)
+            new = FinancialReport(
+                ticker=ticker,
+                report_type=report_type,
+                period_type=period_type,
+                report_year=report_year,
+                report_quarter=report_quarter,
+                lang=lang,
+                data=rowdict
+            )
+            session.add(new)
 
-    print("===== FULL LOAD DONE =====")
-    print(total)
-    return total
+        session.commit()
+        logger.info("Saved %d rows to DB", len(df))
+    except Exception as e:
+        session.rollback()
+        logger.exception("Error saving to DB: %s", e)
+    finally:
+        session.close()
 
+def fetch_financial_df_for_ticker(ticker: str, source="VCI", period="quarter", lang="vi"):
+    """
+    Khởi tạo Finance đúng cách và gọi các method hiện có.
+    Trả về dict of DataFrame: {'income_statement': df, ...}
+    """
+    results = {}
+    try:
+        finance_client = Finance(symbol=ticker, source=source)
+    except TypeError as e:
+        # Nếu Finance __init__ khác signature, thử khác tạo instance
+        finance_client = Finance(ticker)  # fallback (nếu signature khác)
 
-if __name__ == "__main__":
-    full_load()
+    # Các report types và các method tên khả dĩ
+    map_methods = {
+        "income_statement": ["income_statement", "income", "statement_income"],
+        "balance_sheet": ["balance_sheet", "balance", "statement_balance"],
+        "cash_flow": ["cash_flow", "cashflow", "cash"],
+    }
 
-# Delta load fetch finance by year and ma co phieu
-def fetch_finance_by_year(symbol: str, year: int, lang="vi"):
+    for rtype, candidates in map_methods.items():
+        df = None
+        for name in candidates:
+            if hasattr(finance_client, name):
+                func = getattr(finance_client, name)
+                # gọi thử với nhiều signature
+                try:
+                    df = func(period=period, lang=lang, symbol=ticker)
+                except TypeError:
+                    try:
+                        df = func(period=period, lang=lang)
+                    except TypeError:
+                        try:
+                            df = func(period)
+                        except TypeError:
+                            try:
+                                df = func()
+                            except Exception:
+                                df = None
+                except Exception as e:
+                    logger.debug("call %s failed: %s", name, e)
+                if isinstance(df, pd.DataFrame):
+                    break
+        results[rtype] = df
+    return results
+
+# def test_fetch_one(ticker="VCB"):
+#     """
+#     Debug helper: fetch for one ticker and print shapes/cols.
+#     """
+#     results = fetch_financial_df_for_ticker(ticker, source="VCI", period="quarter")
+#     for k, df in results.items():
+#         if df is None:
+#             print(f"{ticker} - {k}: None")
+#         else:
+#             print(f"{ticker} - {k}: rows={len(df)}, cols={df.columns.tolist()}")
+#     return results
+
+def full_load_financials(tickers, source="VCI", period_types=["quarter"], lang="vi"):
+    if not tickers:
+        logger.error("Empty tickers list -> abort full load")
+        return
     
-    # Delay ngẫu nhiên tránh rate-limit
-    time.sleep(random.uniform(0.5, 2.0))
-    stock = Vnstock().stock(symbol=symbol, source="VCI")
-    period = "year"
+    # Load checkpoint
+    last_ticker = load_checkpoint()
+    skip_mode = bool(last_ticker)
+    logger.info("[FULL LOAD] Checkpoint last_ticker = %s", last_ticker)
 
-    # Income
-    df_income = stock.finance.income_statement(period=period, lang=lang)
-    if df_income is not None and not df_income.empty:
-        df_income["Năm"] = df_income["Năm"].astype(str)
-        df_income = df_income[df_income["Năm"] == str(year)]
-    else:
-        df_income = None
+    for i, t in enumerate(tickers):
+        if skip_mode:
+            if t == last_ticker:
+                skip_mode = False
+            else:
+                continue
 
-    # Balance
-    df_balance = stock.finance.balance_sheet(period=period, lang=lang)
-    if df_balance is not None and not df_balance.empty:
-        df_balance["Năm"] = df_balance["Năm"].astype(str)
-        df_balance = df_balance[df_balance["Năm"] == str(year)]
-    else:
-        df_balance = None
+        logger.info("Processing %d/%d: %s", i+1, len(tickers), t)
+        for period in period_types:
+            retry = 0
+            while retry < 5:  # tối đa thử lại 5 lần
+                try:
+                    reports = fetch_financial_df_for_ticker(t, source=source, period=period)
+                    if not reports:
+                        logger.warning("Không có dữ liệu cho %s %s", t, period)
+                        break
 
-    # CashFlow
-    df_cf = stock.finance.cash_flow(period=period, lang=lang)
-    if df_cf is not None and not df_cf.empty:
-        df_cf["Năm"] = df_cf["Năm"].astype(str)
-        df_cf = df_cf[df_cf["Năm"] == str(year)]
-    else:
-        df_cf = None
+                    for rname, df in reports.items():
+                        if df is None or df.empty:
+                            logger.info("No data for %s %s %s", t, rname, period)
+                            continue
+                        df = df.copy()
+                        # Chuẩn hóa cột report_year
+                        if 'report_year' not in df.columns:
+                            if 'Năm' in df.columns:  
+                                df['report_year'] = df['Năm']
+                            elif 'year' in df.columns:
+                                df['report_year'] = df['year']
+                            else:
+                                raise ValueError("Không tìm thấy cột năm trong dữ liệu đầu vào")
 
-    return save_finance(symbol, df_income, df_balance, df_cf, period, lang)
+                        # Chuẩn hóa cột report_quarter
+                        if 'report_quarter' not in df.columns:
+                            if 'Kỳ' in df.columns:  
+                                # Lấy số từ chuỗi "Kỳ 2" -> 2
+                                df['report_quarter'] = df['Kỳ'].astype(str).str.extract(r'(\d+)')
+                            elif 'quarter' in df.columns:
+                                df['report_quarter'] = df['quarter']
+                            else:
+                                # Nếu không có quarter (chẳng hạn báo cáo năm), gán mặc định = 0
+                                df['report_quarter'] = 0
 
+                        # Convert về int để chắc chắn không null
+                        df['report_year'] = df['report_year'].astype(int)
+                        df['report_quarter'] = df['report_quarter'].astype(int)
+                        df['ticker'] = t
+                        df['lang']=lang
+                        df['report_type'] = rname
+                        df['period_type'] = period
+                        save_to_db(df)
+
+                    break  # thành công thì thoát vòng retry
+
+                except Exception as e:
+                    err = str(e)
+                    if "Rate limit exceeded" in err:
+                        # tìm số giây trong message
+                        wait_time = 30
+                        match = re.search(r"(\d+)\s*giây", err)
+                        if match:
+                            wait_time = int(match.group(1))
+                        logger.warning("⚠️ Bị rate limit khi fetch %s. Chờ %d giây...", t, wait_time)
+                        time.sleep(wait_time + 2)  # chờ thêm cho chắc
+                        retry += 1
+                    else:
+                        logger.exception("Lỗi khác với %s: %s", t, e)
+                        break
+        # ✅ Lưu checkpoint sau khi xong ticker
+        save_checkpoint(t)
+        time.sleep(1)  # nghỉ 1s giữa các ticker
