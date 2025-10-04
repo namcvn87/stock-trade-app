@@ -275,7 +275,7 @@ def delta_load_financials(tickers, source="VCI", period_types=["quarter"], symbo
                     df_new['period_type'] = period
 
                     save_to_db(df_new)
-
+                    time.sleep(1)
             except Exception as e:
                 logger.exception("Lỗi khi delta-load %s: %s", t, e)
 
