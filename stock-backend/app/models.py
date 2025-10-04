@@ -1,5 +1,6 @@
-from sqlalchemy import Column, String, Date, Float, BigInteger, Integer, TIMESTAMP, Numeric, UniqueConstraint, JSON
+from sqlalchemy import Column, String, Date, Float, BigInteger, Integer, TIMESTAMP, Numeric, UniqueConstraint, JSON, DateTime
 from .database import Base
+from datetime import datetime
 
 # Thông tin công ty
 class Company(Base):
@@ -69,4 +70,9 @@ class FinancialReport(Base):
         UniqueConstraint("ticker", "report_type", "period_type", "report_year", "report_quarter", "lang", name="uniq_report"),
     )
 
+class IssueShare(Base):
+    __tablename__ = "issue_shares"
 
+    symbol = Column(String, primary_key=True, index=True)
+    issue_share = Column(BigInteger)
+    updated_at = Column(DateTime, default=datetime.now)
