@@ -24,7 +24,7 @@ def main():
 
     if choice == "1":
         tickers = get_all_tickers()
-        full_load_financials(tickers, source="VCI", period_types=["quarter"], lang="vi")
+        full_load_financials(tickers, source="VCI", period_types=["quarter", "year"], lang="vi")
 
     elif choice == "2":
         tickers = get_all_tickers()
