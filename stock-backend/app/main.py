@@ -37,7 +37,7 @@ def main():
             tickers,
             source="VCI",
             lang="vi",
-            period_types=["quarter"],
+            period_types=["quarter", "year"],
             symbol=symbol
         )
 
