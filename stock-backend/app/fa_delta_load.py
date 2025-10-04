@@ -41,15 +41,26 @@ def fetch_financial_df_for_ticker(ticker, source="VCI", period="quarter", lang="
 
 
 # ================== DB Helpers ==================
-def get_max_report_period(ticker, report_type):
-    query = """
-        SELECT report_year, report_quarter
-        FROM financial_reports
-        WHERE ticker = %s AND report_type = %s AND period_type = 'quarter'
-          AND report_year IS NOT NULL AND report_year > 0
-        ORDER BY report_year DESC, report_quarter DESC
-        LIMIT 1;
-    """
+def get_max_report_period(ticker, report_type, period_type="quarter"):
+    if period_type == "quarter":
+        query = """
+            SELECT report_year, report_quarter
+            FROM financial_reports
+            WHERE ticker = %s AND report_type = %s AND period_type = 'quarter'
+              AND report_year IS NOT NULL AND report_year > 0
+            ORDER BY report_year DESC, report_quarter DESC
+            LIMIT 1;
+        """
+    else:  # year
+        query = """
+            SELECT report_year
+            FROM financial_reports
+            WHERE ticker = %s AND report_type = %s AND period_type = 'year'
+              AND report_year IS NOT NULL AND report_year > 0
+            ORDER BY report_year DESC
+            LIMIT 1;
+        """
+
     with psycopg2.connect(
         dbname="stockdb",
         user="postgres",
@@ -61,8 +72,12 @@ def get_max_report_period(ticker, report_type):
             cur.execute(query, (ticker, report_type))
             row = cur.fetchone()
             if row:
-                return row[0], row[1]
+                if period_type == "quarter":
+                    return row[0], row[1]   # (year, quarter)
+                else:
+                    return row[0], 0        # (year, 0) vì không có quarter
     return 0, 0
+
 
 
 def get_all_tickers():
@@ -92,8 +107,9 @@ def compute_record_key(ticker, report_type, period_type, report_year, report_qua
 
 
 # ================== Chuẩn hóa DataFrame ==================
-def normalize_financial_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Chuẩn hóa cột report_year và report_quarter để delta load luôn hoạt động"""
+def normalize_financial_df(df: pd.DataFrame, period_type="quarter") -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
     df_new = df.copy()
 
     # Chuẩn hóa cột report_year
@@ -108,21 +124,25 @@ def normalize_financial_df(df: pd.DataFrame) -> pd.DataFrame:
             df_new['report_year'] = 0
 
     # Chuẩn hóa cột report_quarter
-    if 'report_quarter' not in df_new.columns:
-        if 'Kỳ' in df_new.columns:
-            df_new['report_quarter'] = df_new['Kỳ'].astype(str).str.extract(r'(\d+)')
-        elif 'quarter' in df_new.columns:
-            df_new['report_quarter'] = df_new['quarter']
-        elif 'lengthReport' in df_new.columns:
-            df_new['report_quarter'] = df_new['lengthReport'].astype(str).str.extract(r'(\d+)')
-        else:
-            df_new['report_quarter'] = 0
+    if period_type == "quarter":
+        if 'report_quarter' not in df_new.columns:
+            if 'Kỳ' in df_new.columns:
+                df_new['report_quarter'] = df_new['Kỳ'].astype(str).str.extract(r'(\d+)')
+            elif 'quarter' in df_new.columns:
+                df_new['report_quarter'] = df_new['quarter']
+            elif 'lengthReport' in df_new.columns:
+                df_new['report_quarter'] = df_new['lengthReport'].astype(str).str.extract(r'(\d+)')
+            else:
+                df_new['report_quarter'] = 0
+    else:  # year
+        df_new['report_quarter'] = 0
 
     # Ép kiểu int
     df_new['report_year'] = df_new['report_year'].fillna(0).astype(int)
     df_new['report_quarter'] = df_new['report_quarter'].fillna(0).astype(int)
 
     return df_new
+
 
 
 # ================== Save vào DB ==================
@@ -209,7 +229,7 @@ def delta_load_financials(tickers, source="VCI", period_types=["quarter"], symbo
 
         logger.info("Delta processing %d/%d: %s", i+1, len(tickers), t)
 
-        for period in period_types:
+        for period in period_types:   # loop cả quarter và year
             try:
                 reports = fetch_financial_df_for_ticker(t, source=source, period=period, lang=lang)
                 if not reports:
@@ -219,19 +239,31 @@ def delta_load_financials(tickers, source="VCI", period_types=["quarter"], symbo
                     if df is None or df.empty:
                         continue
 
-                    max_year, max_quarter = get_max_report_period(t, rname)
-                    logger.info("Ticker %s %s %s max in DB = %s-%s", t, rname, period, max_year, max_quarter)
-
-                    df_new = normalize_financial_df(df)
-
-                    if max_year == 0 and max_quarter == 0:
-                        logger.info("Ticker %s %s %s chưa có trong DB -> insert toàn bộ", t, rname, period)
+                    # Lấy max period trong DB theo từng loại
+                    max_year, max_quarter = get_max_report_period(t, rname, period)
+                    if period == "quarter":
+                        logger.info("Ticker %s %s quarter max in DB = %s-Q%s", t, rname, max_year, max_quarter)
                     else:
-                        mask = (df_new['report_year'] > max_year) | (
-                            (df_new['report_year'] == max_year) & 
-                            (df_new['report_quarter'] > max_quarter)
-                        )
-                        df_new = df_new.loc[mask]
+                        logger.info("Ticker %s %s year max in DB = %s", t, rname, max_year)
+
+                    df_new = normalize_financial_df(df, period_type=period)
+                    # Logic filter theo period_type
+                    if period == "quarter":
+                        if max_year == 0 and max_quarter == 0:
+                            logger.info("Ticker %s %s quarter chưa có trong DB -> insert toàn bộ", t, rname)
+                        else:
+                            mask = (df_new['report_year'] > max_year) | (
+                                (df_new['report_year'] == max_year) &
+                                (df_new['report_quarter'] > max_quarter)
+                            )
+                            df_new = df_new.loc[mask]
+
+                    elif period == "year":
+                        if max_year == 0:
+                            logger.info("Ticker %s %s year chưa có trong DB -> insert toàn bộ", t, rname)
+                        else:
+                            mask = df_new['report_year'] > max_year
+                            df_new = df_new.loc[mask]
 
                     if df_new.empty:
                         logger.info("Không có dữ liệu mới cho %s %s %s", t, rname, period)
