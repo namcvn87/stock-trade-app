@@ -90,7 +90,3 @@ def full_load_issue_shares():
 
     finally:
         db.close()
-
-
-if __name__ == "__main__":
-    full_load_issue_shares()

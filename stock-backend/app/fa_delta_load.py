@@ -1,12 +1,12 @@
 import time
 import logging
-import psycopg2
 import pandas as pd
 from vnstock import Listing, Finance
 from app.database import SessionLocal
 from app.models import Base, FinancialReport
 import json
 import os
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -41,44 +41,30 @@ def fetch_financial_df_for_ticker(ticker, source="VCI", period="quarter", lang="
 
 
 # ================== DB Helpers ==================
-def get_max_report_period(ticker, report_type, period_type="quarter"):
+def get_max_report_period(db: Session, ticker: str, report_type: str, period_type="quarter"):
+    query = (
+        db.query(FinancialReport)
+        .filter(
+            FinancialReport.ticker == ticker,
+            FinancialReport.report_type == report_type,
+            FinancialReport.period_type == period_type,
+            FinancialReport.report_year != None,
+            FinancialReport.report_year > 0,
+        )
+        .order_by(FinancialReport.report_year.desc())
+    )
+
     if period_type == "quarter":
-        query = """
-            SELECT report_year, report_quarter
-            FROM financial_reports
-            WHERE ticker = %s AND report_type = %s AND period_type = 'quarter'
-              AND report_year IS NOT NULL AND report_year > 0
-            ORDER BY report_year DESC, report_quarter DESC
-            LIMIT 1;
-        """
-    else:  # year
-        query = """
-            SELECT report_year
-            FROM financial_reports
-            WHERE ticker = %s AND report_type = %s AND period_type = 'year'
-              AND report_year IS NOT NULL AND report_year > 0
-            ORDER BY report_year DESC
-            LIMIT 1;
-        """
+        query = query.order_by(FinancialReport.report_quarter.desc())
 
-    with psycopg2.connect(
-        dbname="stockdb",
-        user="postgres",
-        password="2110",
-        host="localhost",
-        port="5432"
-    ) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (ticker, report_type))
-            row = cur.fetchone()
-            if row:
-                if period_type == "quarter":
-                    return row[0], row[1]   # (year, quarter)
-                else:
-                    return row[0], 0        # (year, 0) vì không có quarter
+    record = query.first()
+
+    if record:
+        if period_type == "quarter":
+            return record.report_year, record.report_quarter
+        return record.report_year, 0
+
     return 0, 0
-
-
 
 def get_all_tickers():
     """Thử nhiều cách lấy list tickers, trả về list string."""
@@ -221,6 +207,7 @@ def delta_load_financials(tickers, source="VCI", period_types=["quarter"], symbo
         skip_mode = bool(last_ticker)
         logger.info("Checkpoint last_ticker = %s", last_ticker)
 
+    db = SessionLocal()
     for i, t in enumerate(tickers):
         if skip_mode:
             if t == last_ticker:
@@ -240,7 +227,7 @@ def delta_load_financials(tickers, source="VCI", period_types=["quarter"], symbo
                         continue
 
                     # Lấy max period trong DB theo từng loại
-                    max_year, max_quarter = get_max_report_period(t, rname, period)
+                    max_year, max_quarter = get_max_report_period(db, t, rname, period)
                     if period == "quarter":
                         logger.info("Ticker %s %s quarter max in DB = %s-Q%s", t, rname, max_year, max_quarter)
                     else:

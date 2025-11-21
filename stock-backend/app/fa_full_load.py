@@ -1,4 +1,3 @@
-# loader.py
 import logging, time, re 
 import pandas as pd
 from vnstock import Listing, Finance
@@ -30,16 +29,6 @@ def save_checkpoint(ticker):
         json.dump({"last_ticker": ticker}, f)
 
 def get_all_tickers():
-    """Thử nhiều cách lấy list tickers, trả về list string."""
-    # Cách 1: Listing.all_symbols (class method)
-    try:
-        df = Listing.all_symbols()
-        if isinstance(df, pd.DataFrame) and "symbol" in df.columns:
-            return df['symbol'].dropna().unique().tolist()
-    except Exception:
-        pass
-
-    # Cách 2: Listing() instance .all_symbols()
     try:
         listing = Listing()
         df = listing.all_symbols()
@@ -232,23 +221,11 @@ def full_load_financials(tickers, source="VCI", period_types=["quarter"], lang="
                         df['report_type'] = rname
                         df['period_type'] = period
                         save_to_db(df)
-
+                        time.sleep(1)
                     break  # thành công thì thoát vòng retry
 
                 except Exception as e:
-                    err = str(e)
-                    if "Rate limit exceeded" in err:
-                        # tìm số giây trong message
-                        wait_time = 30
-                        match = re.search(r"(\d+)\s*giây", err)
-                        if match:
-                            wait_time = int(match.group(1))
-                        logger.warning("⚠️ Bị rate limit khi fetch %s. Chờ %d giây...", t, wait_time)
-                        time.sleep(wait_time + 2)  # chờ thêm cho chắc
-                        retry += 1
-                    else:
-                        logger.exception("Lỗi khác với %s: %s", t, e)
-                        break
+                    logger.exception("Lỗi khác với %s: %s", t, e)
         # ✅ Lưu checkpoint sau khi xong ticker
         save_checkpoint(t)
         time.sleep(1)  # nghỉ 1s giữa các ticker
