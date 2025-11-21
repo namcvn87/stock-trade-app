@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, Float, BigInteger, Integer, TIMESTAMP, Numeric, UniqueConstraint, JSON, DateTime
+from sqlalchemy import Column, String, Date, Float, BigInteger, Integer, TIMESTAMP, Numeric, UniqueConstraint, JSON, DateTime, func
 from .database import Base
 from datetime import datetime
 
@@ -76,3 +76,54 @@ class IssueShare(Base):
     symbol = Column(String, primary_key=True, index=True)
     issue_share = Column(BigInteger)
     updated_at = Column(DateTime, default=datetime.now)
+
+class FinancialGrowthReport(Base):
+    __tablename__ = "financial_growth_report"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String(10), nullable=False, index=True)
+    year = Column(Integer, nullable=True)
+    quarter = Column(Integer, nullable=True)
+
+    # Các chỉ số quý
+    loi_nhuan_sau_thue_quy = Column(Float, nullable=True)
+    lnst_toc_do_3quy = Column(String(50), nullable=True)
+    lnst_so_quy_lien_tiep_tang_toc = Column(Integer, nullable=True)
+
+    doanh_thu_quy = Column(Float, nullable=True)
+    dt_toc_do_3quy = Column(String(50), nullable=True)
+    dt_so_quy_lien_tiep_tang_toc = Column(Integer, nullable=True)
+
+    eps_quy = Column(Float, nullable=True)
+    eps_toc_do_3quy = Column(String(50), nullable=True)
+    eps_so_quy_lien_tiep_tang_toc = Column(Integer, nullable=True)
+
+    # Các chỉ số năm
+    loi_nhuan_sau_thue_nam = Column(Float, nullable=True)
+    lnst_toc_do_3nam = Column(String(50), nullable=True)
+    lnst_so_nam_lien_tiep_tang_toc = Column(Integer, nullable=True)
+
+    eps_nam = Column(Float, nullable=True)
+    eps_toc_do_3nam = Column(String(50), nullable=True)
+    eps_so_nam_lien_tiep_tang_toc = Column(Integer, nullable=True)
+
+    dt_nam = Column(Float, nullable=True)
+    dt_toc_do_3nam = Column(String(50), nullable=True)
+
+    loi_nhuan_bien_gop_nam = Column(Float, nullable=True)
+    su_mo_rong_lnbg = Column(String(50), nullable=True)
+
+    loi_nhuan_bien_rong_st_nam = Column(Float, nullable=True)
+    su_mo_rong_lnbr_st = Column(String(50), nullable=True)
+
+    roe = Column(Float, nullable=True)
+
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "year", "quarter", name="uq_growth_report_ticker_year_quarter"),
+    )
+
+    def __repr__(self):
+        return f"<FinancialGrowthReport(ticker={self.ticker}, year={self.year}, quarter={self.quarter})>"

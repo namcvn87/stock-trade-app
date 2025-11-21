@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import FinancialReport
 
-router = APIRouter()
+router = APIRouter(prefix="/FaStock Get Data", tags=["FaStock Get Data"])
 
 def get_db():
     db = SessionLocal()
